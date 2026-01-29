@@ -4,8 +4,9 @@ import requests
 import datetime
 import time
 import pandas as pd
+import json
 
-# Session state
+# Session state keys
 SESSION_KEYS = ['session_token', 'employee_id', 'employee_name', 'role', 'last_activity']
 for key in SESSION_KEYS:
     if key not in st.session_state:
@@ -78,6 +79,14 @@ def require_role(required_role):
         st.error("Unauthorized access")
         logout()
         st.stop()
+
+def mask_id(employee_id):
+    """Mask employee ID for display"""
+    if not employee_id:
+        return "UNKNOWN"
+    if len(str(employee_id)) <= 4:
+        return employee_id
+    return f"***{str(employee_id)[-4:]}"
 
 # ==============================================
 # LOGIN PAGE
@@ -154,7 +163,7 @@ def login_page():
 # ==============================================
 
 def employee_dashboard():
-    """Employee dashboard with separate Logout button"""
+    """Employee dashboard"""
     require_auth()
     
     # Header
@@ -162,7 +171,6 @@ def employee_dashboard():
     with col1:
         st.title(f"👤 {st.session_state.employee_name}")
     with col2:
-        # Get attendance status
         result = call_gas_endpoint('getTodayAttendance')
         if result and result.get('success'):
             status = "🟢 Clocked In" if result.get('clockedIn') else "🔴 Not Clocked In"
@@ -210,17 +218,7 @@ def attendance_tab():
                     time.sleep(1)
                     st.rerun()
                 elif result and result.get('requiresApproval'):
-                    with st.spinner("Requesting approval..."):
-                        # Request early clock-in approval
-                        early_result = call_gas_endpoint('requestEarlyClockIn', {
-                            'notes': 'Early clock-in request'
-                        })
-                        if early_result and early_result.get('success'):
-                            st.success("✓ Request sent! Check your email for OTP.")
-                            st.info("Admin approval is pending. You'll be notified via email.")
-                        else:
-                            error_msg = early_result.get('message', 'Failed') if early_result else 'Error'
-                            st.error(f"✗ {error_msg}")
+                    st.info("Early clock-in detected. Please use the Request Early Clock-In button.")
                 else:
                     error_msg = result.get('message', 'Failed') if result else 'Error'
                     st.error(f"✗ {error_msg}")
@@ -232,10 +230,9 @@ def attendance_tab():
             if st.button("⏰ Request Early Clock-In", use_container_width=True):
                 st.info("""
                 **Early Clock-In Process:**
-                1. Click this button to request early clock-in
-                2. Check your email for OTP
-                3. Admin will approve your request
-                4. You'll be notified when approved
+                1. Check your email for OTP
+                2. Admin will approve your request
+                3. You'll be notified when approved
                 """)
                 with st.spinner("Processing request..."):
                     result = call_gas_endpoint('requestEarlyClockIn', {
@@ -261,16 +258,7 @@ def attendance_tab():
                     time.sleep(1)
                     st.rerun()
                 elif result and result.get('requiresApproval'):
-                    with st.spinner("Requesting approval..."):
-                        ot_result = call_gas_endpoint('requestOvertime', {
-                            'notes': 'Overtime request'
-                        })
-                        if ot_result and ot_result.get('success'):
-                            st.success("✓ Request sent! Check your email for OTP.")
-                            st.info("Admin approval is pending. You'll be notified via email.")
-                        else:
-                            error_msg = ot_result.get('message', 'Failed') if ot_result else 'Error'
-                            st.error(f"✗ {error_msg}")
+                    st.info("Overtime detected. Please use the Request Overtime button.")
                 else:
                     error_msg = result.get('message', 'Failed') if result else 'Error'
                     st.error(f"✗ {error_msg}")
@@ -284,10 +272,9 @@ def attendance_tab():
             if st.button("🌙 Request Overtime", use_container_width=True):
                 st.info("""
                 **Overtime Process:**
-                1. Click this button to request overtime
-                2. Check your email for OTP
-                3. Admin will approve your request
-                4. You'll be notified when approved
+                1. Check your email for OTP
+                2. Admin will approve your request
+                3. You'll be notified when approved
                 """)
                 with st.spinner("Processing request..."):
                     result = call_gas_endpoint('requestOvertime', {
@@ -875,7 +862,7 @@ def system_logs_tab():
                     
                     if log['details']:
                         try:
-                            details = eval(log['details']) if isinstance(log['details'], str) else log['details']
+                            details = json.loads(log['details'])
                             st.write("**Details:**", details)
                         except:
                             st.write("**Details:**", log['details'])
@@ -883,14 +870,6 @@ def system_logs_tab():
             st.info("No logs found")
     else:
         st.error("Failed to load logs")
-
-def mask_id(employee_id):
-    """Mask employee ID for display"""
-    if not employee_id:
-        return "UNKNOWN"
-    if len(str(employee_id)) <= 4:
-        return employee_id
-    return f"***{str(employee_id)[-4:]}"
 
 # ==============================================
 # MAIN APPLICATION

@@ -1,0 +1,961 @@
+// ==============================================
+// GOOGLE APPS SCRIPT BACKEND v3.0
+// COMPLETE ATTENDANCE, INVENTORY & PAYROLL SYSTEM
+// ==============================================
+
+const SPREADSHEET_ID = '1U81POEPRLTsnmjmdNxSKYC129PjLUnD_0WK2YUaEUCQ';
+const ADMIN_EMAIL = 'printacreationsservices@gmail.com';
+
+// SHEET STRUCTURE
+const SHEETS = {
+  EMPLOYEE_PROFILE: 'Employee Profile',
+  DATA: 'DATA',
+  PAYSLIP: 'PaySlip',
+  INVENTORY: 'Inventory',
+  PRICELIST: 'Pricelist',
+  SECURITY_LOG: 'Security Log',
+  SESSIONS: 'Sessions',
+  OTP_STORE: 'OTP_Store',
+  MESSAGES: 'Messages',
+  PENDING_APPROVALS: 'PendingApprovals',
+  PASSWORD_HISTORY: 'PasswordHistory'
+};
+
+// Employee Profile columns (0-indexed)
+const EMP_COLS = {
+  PROFILE_ID: 0,    // A
+  NAME: 1,          // B
+  EMPLOYEE_ID: 2,   // C
+  POSITION: 3,      // D
+  GENDER: 4,        // E
+  DOB: 5,           // F
+  AGE: 6,           // G
+  SHIFT_TYPE: 7,    // H
+  START_TIME: 8,    // I
+  END_TIME: 9,      // J
+  SALARY: 10,       // K
+  EMAIL: 11,        // L
+  STATUS: 12,       // M
+  PASSWORD: 13      // N
+};
+
+// ==============================================
+// 1. MAIN REQUEST HANDLER
+// ==============================================
+
+function doPost(e) {
+  return handleRequest(e);
+}
+
+function doGet(e) {
+  return handleRequest(e);
+}
+
+function handleRequest(e) {
+  try {
+    const request = e.postData ? JSON.parse(e.postData.contents) : e.parameter;
+    const action = request.action;
+    const sessionToken = request.sessionToken;
+    
+    // Log request
+    logSecurityAction({
+      action: `API_${action}`,
+      details: {userAgent: e.userAgent},
+      severity: 'INFO'
+    });
+    
+    // Validate session for protected endpoints
+    if (!isPublicEndpoint(action)) {
+      const session = validateSession(sessionToken);
+      if (!session.valid) {
+        return createResponse(401, {success: false, message: 'Invalid or expired session'});
+      }
+      request.employeeId = session.employeeId;
+      request.role = session.role;
+    }
+    
+    let result;
+    switch(action) {
+      case 'login':
+        result = handleLogin(request);
+        break;
+      case 'logout':
+        result = handleLogout(sessionToken);
+        break;
+      case 'clockIn':
+        result = handleClockIn(request);
+        break;
+      case 'clockOut':
+        result = handleClockOut(request);
+        break;
+      case 'getTodayAttendance':
+        result = handleGetTodayAttendance(request);
+        break;
+      case 'getInventory':
+        result = handleGetInventory(request);
+        break;
+      case 'useInventory':
+        result = handleUseInventory(request);
+        break;
+      case 'getPayslip':
+        result = handleGetPayslip(request);
+        break;
+      case 'getEmployeePayslip':
+        result = handleGetEmployeePayslip(request);
+        break;
+      case 'getAllEmployees':
+        result = handleGetAllEmployees(request);
+        break;
+      case 'getRecentLogs':
+        result = handleGetRecentLogs(request);
+        break;
+      case 'checkSession':
+        result = {valid: true, role: request.role};
+        break;
+      // MESSAGING SYSTEM
+      case 'sendMessage':
+        result = handleSendMessage(request);
+        break;
+      case 'getMessages':
+        result = handleGetMessages(request);
+        break;
+      case 'markMessageRead':
+        result = handleMarkMessageRead(request);
+        break;
+      // PASSWORD MANAGEMENT
+      case 'setEmployeePassword':
+        result = handleSetEmployeePassword(request);
+        break;
+      // EMPLOYEE DATA VIEW
+      case 'getEmployeeInventory':
+        result = handleGetEmployeeInventory(request);
+        break;
+      case 'getAdminDashboard':
+        result = handleGetAdminDashboard(request);
+        break;
+      // PENDING APPROVALS SYSTEM
+      case 'getPendingApprovals':
+        result = handleGetPendingApprovals(request);
+        break;
+      case 'processApproval':
+        result = handleProcessApproval(request);
+        break;
+      case 'requestEarlyClockIn':
+        result = handleRequestEarlyClockIn(request);
+        break;
+      case 'requestOvertime':
+        result = handleRequestOvertime(request);
+        break;
+      default:
+        result = {success: false, message: 'Invalid action'};
+    }
+    
+    return createResponse(200, result);
+    
+  } catch (error) {
+    console.error('System error:', error);
+    logSecurityAction({
+      action: 'SYSTEM_ERROR',
+      details: {error: error.toString()},
+      severity: 'ERROR'
+    });
+    return createResponse(500, {success: false, message: 'System error'});
+  }
+}
+
+function isPublicEndpoint(action) {
+  return ['login'].includes(action);
+}
+
+// ==============================================
+// 2. AUTHENTICATION SYSTEM
+// ==============================================
+
+function handleLogin(request) {
+  const { name, password } = request;
+  
+  if (!name || !password) {
+    return {success: false, message: 'Name and password are required'};
+  }
+  
+  const employee = findEmployeeByName(name);
+  
+  if (!employee) {
+    logSecurityAction({
+      action: 'LOGIN_FAIL',
+      details: {reason: 'Employee not found'},
+      severity: 'WARNING'
+    });
+    return {success: false, message: 'Invalid credentials'};
+  }
+  
+  // Verify password - Column N (index 13)
+  if (!employee.password || employee.password !== password) {
+    logSecurityAction({
+      maskedId: maskId(employee.employeeId),
+      action: 'LOGIN_FAIL',
+      details: {reason: 'Wrong password'},
+      severity: 'WARNING'
+    });
+    return {success: false, message: 'Invalid credentials'};
+  }
+  
+  if (employee.status !== 'Active') {
+    return {success: false, message: 'Account is not active'};
+  }
+  
+  const today = new Date();
+  const todayStr = formatDate(today);
+  const attendance = getTodayAttendance(employee.employeeId, todayStr);
+  
+  const sessionToken = generateSessionToken();
+  const role = employee.position === 'Admin' ? 'ADMIN' : 'EMPLOYEE';
+  createSession(sessionToken, employee.employeeId, role);
+  
+  logSecurityAction({
+    maskedId: maskId(employee.employeeId),
+    action: 'LOGIN_SUCCESS',
+    details: {role: role},
+    severity: 'INFO'
+  });
+  
+  return {
+    success: true,
+    sessionToken: sessionToken,
+    role: role,
+    employeeName: employee.name,
+    employeeId: employee.employeeId,
+    clockedInToday: attendance.clockedIn,
+    clockOutTime: attendance.clockOutTime
+  };
+}
+
+function findEmployeeByName(name) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = ss.getSheetByName(SHEETS.EMPLOYEE_PROFILE);
+  const data = sheet.getDataRange().getValues();
+  
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][EMP_COLS.NAME] && 
+        data[i][EMP_COLS.NAME].toString().toLowerCase() === name.toLowerCase()) {
+      return {
+        name: data[i][EMP_COLS.NAME],
+        employeeId: data[i][EMP_COLS.EMPLOYEE_ID],
+        position: data[i][EMP_COLS.POSITION],
+        gender: data[i][EMP_COLS.GENDER],
+        shiftType: data[i][EMP_COLS.SHIFT_TYPE],
+        startTime: data[i][EMP_COLS.START_TIME],
+        endTime: data[i][EMP_COLS.END_TIME],
+        salary: data[i][EMP_COLS.SALARY],
+        email: data[i][EMP_COLS.EMAIL],
+        status: data[i][EMP_COLS.STATUS],
+        password: data[i][EMP_COLS.PASSWORD] || ''
+      };
+    }
+  }
+  return null;
+}
+
+// ==============================================
+// 3. PENDING APPROVALS SYSTEM
+// ==============================================
+
+function handleRequestEarlyClockIn(request) {
+  const { employeeId, notes } = request;
+  const employee = findEmployeeById(employeeId);
+  const today = new Date();
+  const todayStr = formatDate(today);
+  
+  // Check if already clocked in
+  const attendance = getTodayAttendance(employeeId, todayStr);
+  if (attendance.clockedIn) {
+    return {success: false, message: 'Already clocked in today'};
+  }
+  
+  // Generate OTP
+  const otp = generateOTP();
+  const otpExpiry = new Date(today.getTime() + 10 * 60000);
+  
+  // Store OTP
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const otpSheet = getOrCreateSheet(ss, SHEETS.OTP_STORE);
+  otpSheet.appendRow([today, employeeId, 'EARLYCLOCKIN', otp, otpExpiry, 'ACTIVE']);
+  
+  // Create pending approval
+  const pendingSheet = getOrCreateSheet(ss, SHEETS.PENDING_APPROVALS);
+  const approvalId = `EARLY-${Date.now()}-${employeeId}`;
+  
+  pendingSheet.appendRow([
+    today,
+    approvalId,
+    employeeId,
+    employee.name,
+    'EARLY_CLOCKIN',
+    todayStr,
+    formatTime(today),
+    null,
+    notes || 'Early clock-in request',
+    otp,
+    'PENDING',
+    null,
+    null,
+    JSON.stringify({minutesEarly: calculateMinutesEarly(employee.startTime, today)})
+  ]);
+  
+  // Send OTP to employee email
+  if (employee.email) {
+    MailApp.sendEmail({
+      to: employee.email,
+      subject: 'Early Clock-In OTP & Pending Approval',
+      body: `Dear ${employee.name},\n\nYour OTP: ${otp}\nValid for 10 minutes.\n\nRequest is pending admin approval.`
+    });
+  }
+  
+  // Send notification to admin
+  MailApp.sendEmail({
+    to: ADMIN_EMAIL,
+    subject: 'Pending Approval: Early Clock-In Request',
+    body: `Employee: ${employee.name}\nRequest: Early Clock-In\nTime: ${formatTime(today)}\nDate: ${todayStr}\nStatus: Pending`
+  });
+  
+  logSecurityAction({
+    maskedId: maskId(employeeId),
+    action: 'EARLY_CLOCKIN_REQUEST',
+    details: {approvalId: approvalId},
+    severity: 'INFO'
+  });
+  
+  return {
+    success: true,
+    message: 'OTP sent to your email. Request pending admin approval.',
+    approvalId: approvalId,
+    requiresOTP: false
+  };
+}
+
+function handleRequestOvertime(request) {
+  const { employeeId, notes } = request;
+  const employee = findEmployeeById(employeeId);
+  const today = new Date();
+  const todayStr = formatDate(today);
+  
+  // Check if clocked in
+  const attendance = getTodayAttendance(employeeId, todayStr);
+  if (!attendance.clockedIn) {
+    return {success: false, message: 'Must be clocked in to request overtime'};
+  }
+  
+  if (attendance.clockOutTime) {
+    return {success: false, message: 'Already clocked out today'};
+  }
+  
+  // Generate OTP
+  const otp = generateOTP();
+  const otpExpiry = new Date(today.getTime() + 10 * 60000);
+  
+  // Store OTP
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const otpSheet = getOrCreateSheet(ss, SHEETS.OTP_STORE);
+  otpSheet.appendRow([today, employeeId, 'OVERTIME', otp, otpExpiry, 'ACTIVE']);
+  
+  // Create pending approval
+  const pendingSheet = getOrCreateSheet(ss, SHEETS.PENDING_APPROVALS);
+  const approvalId = `OT-${Date.now()}-${employeeId}`;
+  
+  pendingSheet.appendRow([
+    today,
+    approvalId,
+    employeeId,
+    employee.name,
+    'OVERTIME',
+    todayStr,
+    attendance.clockInTime,
+    formatTime(today),
+    notes || 'Overtime request',
+    otp,
+    'PENDING',
+    null,
+    null,
+    JSON.stringify({minutesOvertime: calculateMinutesOvertime(employee.endTime, today)})
+  ]);
+  
+  // Send OTP to employee email
+  if (employee.email) {
+    MailApp.sendEmail({
+      to: employee.email,
+      subject: 'Overtime OTP & Pending Approval',
+      body: `Dear ${employee.name},\n\nYour OTP: ${otp}\nValid for 10 minutes.\n\nRequest is pending admin approval.`
+    });
+  }
+  
+  // Send notification to admin
+  MailApp.sendEmail({
+    to: ADMIN_EMAIL,
+    subject: 'Pending Approval: Overtime Request',
+    body: `Employee: ${employee.name}\nRequest: Overtime\nClock In: ${attendance.clockInTime}\nRequested Clock Out: ${formatTime(today)}`
+  });
+  
+  logSecurityAction({
+    maskedId: maskId(employeeId),
+    action: 'OVERTIME_REQUEST',
+    details: {approvalId: approvalId},
+    severity: 'INFO'
+  });
+  
+  return {
+    success: true,
+    message: 'OTP sent to your email. Request pending admin approval.',
+    approvalId: approvalId,
+    requiresOTP: false
+  };
+}
+
+function handleGetPendingApprovals(request) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = getOrCreateSheet(ss, SHEETS.PENDING_APPROVALS);
+  const data = sheet.getDataRange().getValues();
+  
+  const approvals = [];
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][10] === 'PENDING') {
+      approvals.push({
+        rowIndex: i + 1,
+        approvalId: data[i][1],
+        employeeId: data[i][2],
+        employeeName: data[i][3],
+        type: data[i][4],
+        date: data[i][5],
+        clockInTime: data[i][6],
+        clockOutTime: data[i][7],
+        notes: data[i][8],
+        otp: data[i][9],
+        status: data[i][10],
+        details: JSON.parse(data[i][13] || '{}')
+      });
+    }
+  }
+  
+  return {success: true, approvals: approvals};
+}
+
+function handleProcessApproval(request) {
+  const { approvalId, approve, adminId, adminName } = request;
+  
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const pendingSheet = getOrCreateSheet(ss, SHEETS.PENDING_APPROVALS);
+  const data = pendingSheet.getDataRange().getValues();
+  
+  let approvalRow = -1;
+  let approvalData = null;
+  
+  // Find the approval
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][1] === approvalId) {
+      approvalRow = i + 1;
+      approvalData = {
+        employeeId: data[i][2],
+        employeeName: data[i][3],
+        type: data[i][4],
+        date: data[i][5],
+        clockInTime: data[i][6],
+        clockOutTime: data[i][7],
+        notes: data[i][8],
+        otp: data[i][9]
+      };
+      break;
+    }
+  }
+  
+  if (approvalRow === -1) {
+    return {success: false, message: 'Approval not found'};
+  }
+  
+  const now = new Date();
+  const status = approve ? 'APPROVED' : 'REJECTED';
+  
+  // Update pending approval
+  pendingSheet.getRange(approvalRow, 11).setValue(status);
+  pendingSheet.getRange(approvalRow, 12).setValue(adminName);
+  pendingSheet.getRange(approvalRow, 13).setValue(now);
+  
+  const employee = findEmployeeById(approvalData.employeeId);
+  
+  if (approve) {
+    // Process approved request
+    if (approvalData.type === 'EARLY_CLOCKIN') {
+      // Record clock in
+      const dataSheet = ss.getSheetByName(SHEETS.DATA);
+      dataSheet.appendRow([
+        '',
+        approvalData.date,
+        approvalData.employeeName,
+        approvalData.clockInTime,
+        '',
+        '',
+        '',
+        '',
+        '',
+        employee.shiftType,
+        'EARLYCLOCKIN_APPROVED',
+        approvalData.employeeId
+      ]);
+    } else if (approvalData.type === 'OVERTIME') {
+      // Update clock out time
+      const dataSheet = ss.getSheetByName(SHEETS.DATA);
+      const dataValues = dataSheet.getDataRange().getValues();
+      
+      for (let i = 1; i < dataValues.length; i++) {
+        if (dataValues[i][11] === approvalData.employeeId && 
+            dataValues[i][1] === approvalData.date && 
+            dataValues[i][3] && !dataValues[i][4]) {
+          
+          dataSheet.getRange(i + 1, 5).setValue(approvalData.clockOutTime);
+          
+          const currentNotes = dataValues[i][10] || '';
+          const newNotes = currentNotes ? currentNotes + '_OVERTIME_APPROVED' : 'OVERTIME_APPROVED';
+          dataSheet.getRange(i + 1, 11).setValue(newNotes);
+          
+          break;
+        }
+      }
+    }
+    
+    // Send approval notification
+    if (employee.email) {
+      MailApp.sendEmail({
+        to: employee.email,
+        subject: `Request Approved: ${approvalData.type}`,
+        body: `Dear ${employee.name},\n\nYour ${approvalData.type} request has been APPROVED by ${adminName}.\n\nThank you.`
+      });
+    }
+  } else {
+    // Send rejection notification
+    if (employee.email) {
+      MailApp.sendEmail({
+        to: employee.email,
+        subject: `Request Rejected: ${approvalData.type}`,
+        body: `Dear ${employee.name},\n\nYour ${approvalData.type} request has been REJECTED by ${adminName}.\n\nPlease contact administrator.`
+      });
+    }
+  }
+  
+  logSecurityAction({
+    maskedId: maskId(adminId),
+    action: `APPROVAL_${status}`,
+    details: {approvalId: approvalId, type: approvalData.type},
+    severity: 'INFO'
+  });
+  
+  return {
+    success: true,
+    message: `Request ${status.toLowerCase()} successfully`
+  };
+}
+
+// ==============================================
+// 4. ATTENDANCE SYSTEM
+// ==============================================
+
+function handleClockIn(request) {
+  const { employeeId, notes } = request;
+  const employee = findEmployeeById(employeeId);
+  const today = new Date();
+  const todayStr = formatDate(today);
+  
+  const attendance = getTodayAttendance(employeeId, todayStr);
+  if (attendance.clockedIn) {
+    return {success: false, message: 'Already clocked in today'};
+  }
+  
+  // Check for early clock-in
+  const minutesEarly = calculateMinutesEarly(employee.startTime, today);
+  if (minutesEarly > 30) {
+    return {
+      success: false,
+      requiresApproval: true,
+      message: 'Early clock-in requires admin approval'
+    };
+  }
+  
+  let finalNotes = notes || 'ONTIMECLOCKIN';
+  if (minutesEarly < -5) {
+    finalNotes = 'LATE';
+  }
+  
+  // Record clock-in
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = ss.getSheetByName(SHEETS.DATA);
+  
+  sheet.appendRow([
+    '', todayStr, employee.name,
+    formatTime(today),
+    '', '', '', '', '', employee.shiftType,
+    finalNotes, employeeId
+  ]);
+  
+  logSecurityAction({
+    maskedId: maskId(employeeId),
+    action: 'CLOCK_IN',
+    details: {notes: finalNotes},
+    severity: 'INFO'
+  });
+  
+  return {success: true, message: 'Clocked in successfully'};
+}
+
+function handleClockOut(request) {
+  const { employeeId, notes } = request;
+  const today = new Date();
+  const todayStr = formatDate(today);
+  
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = ss.getSheetByName(SHEETS.DATA);
+  const data = sheet.getDataRange().getValues();
+  
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][11] === employeeId && data[i][1] === todayStr && data[i][3] && !data[i][4]) {
+      const employee = findEmployeeById(employeeId);
+      const minutesOvertime = calculateMinutesOvertime(employee.endTime, today);
+      
+      // Check for overtime
+      if (minutesOvertime > 15) {
+        return {
+          success: false,
+          requiresApproval: true,
+          message: 'Overtime requires admin approval'
+        };
+      }
+      
+      // Update clock-out time
+      sheet.getRange(i + 1, 5).setValue(formatTime(today));
+      
+      // Update notes
+      let finalNotes = data[i][10] || '';
+      if (finalNotes === 'ONTIMECLOCKIN') {
+        finalNotes = 'ONTIMECLOCKOUT';
+      } else if (finalNotes === 'LATE') {
+        finalNotes = 'LATE_ONTIMECLOCKOUT';
+      } else if (finalNotes === 'EARLYCLOCKIN') {
+        finalNotes = 'EARLYCLOCKOUT';
+      }
+      
+      if (notes) {
+        finalNotes = finalNotes ? `${finalNotes}_${notes}` : notes;
+      }
+      
+      sheet.getRange(i + 1, 11).setValue(finalNotes);
+      
+      logSecurityAction({
+        maskedId: maskId(employeeId),
+        action: 'CLOCK_OUT',
+        details: {notes: finalNotes},
+        severity: 'INFO'
+      });
+      
+      return {success: true, message: 'Clocked out successfully'};
+    }
+  }
+  
+  return {success: false, message: 'No active clock-in found'};
+}
+
+function handleGetTodayAttendance(request) {
+  const today = formatDate(new Date());
+  const attendance = getTodayAttendance(request.employeeId, today);
+  return {success: true, ...attendance};
+}
+
+// ==============================================
+// 5. INVENTORY SYSTEM
+// ==============================================
+
+function handleGetInventory(request) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = ss.getSheetByName(SHEETS.PRICELIST);
+  const data = sheet.getDataRange().getValues();
+  
+  const items = [];
+  for (let i = 1; i < data.length; i++) {
+    items.push({
+      product: data[i][0],
+      sku: data[i][1],
+      sellingPrice: data[i][5]
+    });
+  }
+  
+  return {success: true, items: items};
+}
+
+function handleUseInventory(request) {
+  const { employeeId, item, quantity, unitPrice } = request;
+  const transactionId = `TXN-${formatDate(new Date())}-${maskId(employeeId)}-${Math.floor(Math.random()*10000)}`;
+  
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = ss.getSheetByName(SHEETS.INVENTORY);
+  
+  sheet.appendRow([
+    new Date(),
+    item,
+    quantity,
+    unitPrice,
+    quantity * unitPrice,
+    transactionId
+  ]);
+  
+  return {
+    success: true,
+    message: 'Inventory transaction recorded',
+    transactionId: transactionId
+  };
+}
+
+function handleGetEmployeeInventory(request) {
+  const { employeeId } = request;
+  const maskedId = maskId(employeeId);
+  
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = ss.getSheetByName(SHEETS.INVENTORY);
+  const data = sheet.getDataRange().getValues();
+  
+  const inventory = [];
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][5] && data[i][5].includes(maskedId)) {
+      inventory.push({
+        date: data[i][0],
+        item: data[i][1],
+        quantity: data[i][2],
+        unitPrice: data[i][3],
+        total: data[i][4],
+        transactionId: data[i][5]
+      });
+    }
+  }
+  
+  return {success: true, inventory: inventory};
+}
+
+// ==============================================
+// 6. PAYSLIP SYSTEM
+// ==============================================
+
+function handleGetPayslip(request) {
+  const employee = findEmployeeById(request.employeeId);
+  return {
+    success: true,
+    payslip: {
+      name: employee.name,
+      gender: employee.gender,
+      basicSalary: employee.salary || 0,
+      gross: employee.salary || 0,
+      deductions: 0,
+      netPay: employee.salary || 0
+    }
+  };
+}
+
+function handleGetEmployeePayslip(request) {
+  const employee = findEmployeeById(request.employeeId);
+  return {
+    success: true,
+    payslip: {
+      name: employee.name,
+      employeeId: employee.employeeId,
+      position: employee.position,
+      basicSalary: employee.salary || 0,
+      gross: employee.salary || 0,
+      deductions: 0,
+      netPay: employee.salary || 0
+    }
+  };
+}
+
+// ==============================================
+// 7. EMPLOYEE MANAGEMENT
+// ==============================================
+
+function handleGetAllEmployees(request) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = ss.getSheetByName(SHEETS.EMPLOYEE_PROFILE);
+  const data = sheet.getDataRange().getValues();
+  
+  const employees = [];
+  for (let i = 1; i < data.length; i++) {
+    employees.push({
+      employeeId: data[i][EMP_COLS.EMPLOYEE_ID],
+      name: data[i][EMP_COLS.NAME],
+      position: data[i][EMP_COLS.POSITION],
+      status: data[i][EMP_COLS.STATUS]
+    });
+  }
+  
+  return {success: true, employees: employees};
+}
+
+function handleSetEmployeePassword(request) {
+  const { targetEmployeeId, newPassword } = request;
+  
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = ss.getSheetByName(SHEETS.EMPLOYEE_PROFILE);
+  const data = sheet.getDataRange().getValues();
+  
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][EMP_COLS.EMPLOYEE_ID] === targetEmployeeId) {
+      sheet.getRange(i + 1, EMP_COLS.PASSWORD + 1).setValue(newPassword);
+      return {success: true, message: 'Password updated'};
+    }
+  }
+  
+  return {success: false, message: 'Employee not found'};
+}
+
+// ==============================================
+// 8. MESSAGING SYSTEM
+// ==============================================
+
+function handleSendMessage(request) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = getOrCreateSheet(ss, SHEETS.MESSAGES);
+  
+  sheet.appendRow([
+    new Date(),
+    request.from,
+    request.to,
+    request.message,
+    request.type || 'GENERAL',
+    'UNREAD'
+  ]);
+  
+  return {success: true, message: 'Message sent'};
+}
+
+function handleGetMessages(request) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = getOrCreateSheet(ss, SHEETS.MESSAGES);
+  const data = sheet.getDataRange().getValues();
+  
+  const messages = [];
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][1] === request.employeeName || data[i][2] === request.employeeName) {
+      messages.push({
+        id: i,
+        timestamp: data[i][0],
+        from: data[i][1],
+        to: data[i][2],
+        message: data[i][3],
+        type: data[i][4],
+        status: data[i][5]
+      });
+    }
+  }
+  
+  return {success: true, messages: messages.reverse()};
+}
+
+function handleMarkMessageRead(request) {
+  const { messageId } = request;
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = getOrCreateSheet(ss, SHEETS.MESSAGES);
+  
+  if (messageId > 0) {
+    sheet.getRange(messageId + 1, 6).setValue('READ');
+  }
+  
+  return {success: true};
+}
+
+// ==============================================
+// 9. ADMIN DASHBOARD
+// ==============================================
+
+function handleGetAdminDashboard(request) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  
+  // Employee count
+  const empSheet = ss.getSheetByName(SHEETS.EMPLOYEE_PROFILE);
+  const empCount = Math.max(0, empSheet.getLastRow() - 1);
+  
+  // Today's attendance
+  const today = formatDate(new Date());
+  const dataSheet = ss.getSheetByName(SHEETS.DATA);
+  const data = dataSheet.getDataRange().getValues();
+  
+  let clockedInToday = 0;
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][1] === today && data[i][3] && !data[i][4]) {
+      clockedInToday++;
+    }
+  }
+  
+  // Pending approvals
+  const pendingSheet = getOrCreateSheet(ss, SHEETS.PENDING_APPROVALS);
+  const pendingData = pendingSheet.getDataRange().getValues();
+  let pendingCount = 0;
+  for (let i = 1; i < pendingData.length; i++) {
+    if (pendingData[i][10] === 'PENDING') {
+      pendingCount++;
+    }
+  }
+  
+  // Unread messages
+  const msgSheet = getOrCreateSheet(ss, SHEETS.MESSAGES);
+  const msgData = msgSheet.getDataRange().getValues();
+  let unreadCount = 0;
+  for (let i = 1; i < msgData.length; i++) {
+    if (msgData[i][5] === 'UNREAD' && msgData[i][2] === 'Admin') {
+      unreadCount++;
+    }
+  }
+  
+  return {
+    success: true,
+    stats: {
+      totalEmployees: empCount,
+      clockedInToday: clockedInToday,
+      pendingApprovals: pendingCount,
+      unreadMessages: unreadCount
+    }
+  };
+}
+
+// ==============================================
+// 10. SYSTEM LOGS
+// ==============================================
+
+function handleGetRecentLogs(request) {
+  const limit = request.limit || 50;
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = ss.getSheetByName(SHEETS.SECURITY_LOG);
+  const data = sheet.getDataRange().getValues();
+  
+  const logs = [];
+  const start = Math.max(1, data.length - limit);
+  
+  for (let i = start; i < data.length; i++) {
+    if (i === 0) continue;
+    logs.push({
+      timestamp: data[i][0],
+      user: data[i][1],
+      action: data[i][2],
+      status: data[i][3],
+      details: data[i][5]
+    });
+  }
+  
+  return {success: true, logs: logs.reverse()};
+}
+
+// ==============================================
+// 11. UTILITY FUNCTIONS
+// ==============================================
+
+function findEmployeeById(employeeId) {
+  const ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  const sheet = ss.getSheetByName(SHEETS.EMPLOYEE_PROFILE);
+  const data = sheet.getDataRange().getValues();
+  
+  for (let i = 1; i < data.length; i++) {
+    if (data[i][EMP_COLS.EMPLOYEE_ID] === employeeId) {
+      return {
+        name: data[i][EMP_COLS.NAME],
+        employeeId: data[i][EMP_COLS.EMPLOYEE_ID],
+        position: data[i][EMP_COLS.POSITION
