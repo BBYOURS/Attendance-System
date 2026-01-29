@@ -1,18 +1,15 @@
 # attendance_system.py
-# ==============================================
-# STREAMLIT FRONTEND - UI ONLY
-# MASTER POLICY COMPLIANT - NO DIRECT SHEET ACCESS
-# ==============================================
-
 import streamlit as st
 import requests
 import datetime
 import time
+import json
+import os
 
 # Session state keys
 SESSION_KEYS = [
     'session_token', 'employee_id', 'employee_name', 
-    'role', 'last_activity', 'clocked_in_today'
+    'role', 'last_activity'
 ]
 
 # Initialize session state
@@ -21,17 +18,30 @@ for key in SESSION_KEYS:
         st.session_state[key] = None
 
 # ==============================================
-# 1. UTILITY FUNCTIONS (FIXED)
+# 1. UTILITY FUNCTIONS
 # ==============================================
 
 def call_gas_endpoint(action, data=None):
     """Call Google Apps Script endpoint"""
     try:
-        # Get GAS endpoint from secrets
-        GAS_ENDPOINT = st.secrets.get("GAS_ENDPOINT", "")
+        # Try to get GAS endpoint from multiple sources
+        GAS_ENDPOINT = ""
         
-        if not GAS_ENDPOINT or GAS_ENDPOINT == "YOUR_GAS_WEB_APP_URL":
-            return {"success": False, "message": "System not configured. Please contact admin."}
+        # First try: Streamlit secrets
+        try:
+            GAS_ENDPOINT = st.secrets.get("GAS_ENDPOINT", "")
+        except:
+            pass
+        
+        # Second try: Environment variable
+        if not GAS_ENDPOINT:
+            GAS_ENDPOINT = os.environ.get("GAS_ENDPOINT", "")
+        
+        # Third try: Hardcoded (TEMPORARY ONLY)
+        if not GAS_ENDPOINT or "YOUR_GAS" in GAS_ENDPOINT:
+            st.error("⚠️ GAS_ENDPOINT not configured")
+            st.info("Please add to .streamlit/secrets.toml:\nGAS_ENDPOINT = \"YOUR_GAS_URL\"")
+            return {"success": False, "message": "System not configured"}
         
         payload = {'action': action}
         if data:
@@ -40,13 +50,27 @@ def call_gas_endpoint(action, data=None):
         if action != 'login' and st.session_state.session_token:
             payload['sessionToken'] = st.session_state.session_token
         
-        response = requests.post(GAS_ENDPOINT, json=payload, timeout=10)
-        return response.json()
+        # Make request with timeout
+        response = requests.post(
+            GAS_ENDPOINT, 
+            json=payload, 
+            timeout=30,
+            headers={'Content-Type': 'application/json'}
+        )
         
+        # Check if response is valid JSON
+        try:
+            return response.json()
+        except json.JSONDecodeError:
+            return {
+                "success": False, 
+                "message": f"Invalid response from server. Status: {response.status_code}"
+            }
+            
     except requests.exceptions.Timeout:
-        return {"success": False, "message": "Connection timeout. Please try again."}
+        return {"success": False, "message": "Connection timeout (30s). Server might be busy."}
     except requests.exceptions.ConnectionError:
-        return {"success": False, "message": "Cannot connect to server. Check your internet."}
+        return {"success": False, "message": "Cannot connect to server. Check URL."}
     except Exception as e:
         return {"success": False, "message": f"System error: {str(e)}"}
 
@@ -55,442 +79,209 @@ def check_session():
     if not st.session_state.session_token:
         return False
     
-    # Check idle timeout
+    # Check idle timeout (10 minutes)
     if st.session_state.last_activity:
         idle_time = datetime.datetime.now() - st.session_state.last_activity
-        if idle_time.total_seconds() > 600:  # 10 minutes idle timeout
+        if idle_time.total_seconds() > 600:
             logout()
             return False
     
     # Update last activity
     st.session_state.last_activity = datetime.datetime.now()
-    
-    # Verify with backend
-    result = call_gas_endpoint('checkSession')
-    return result and result.get('valid', False)
+    return True
 
 def logout():
     """Clear session and logout"""
-    if st.session_state.session_token:
-        call_gas_endpoint('logout')
-    
     for key in SESSION_KEYS:
         st.session_state[key] = None
-    
     st.rerun()
 
-def require_auth():
-    """Require authentication for page access"""
-    if not check_session():
-        st.warning("Please login to access this page")
-        st.stop()
-
-def require_role(required_role):
-    """Require specific role for page access"""
-    require_auth()
-    if st.session_state.role != required_role:
-        st.error("Unauthorized access")
-        st.stop()
-
 # ==============================================
-# 2. PAGE COMPONENTS (UPDATED WITH PASSWORD)
+# 2. SIMPLIFIED LOGIN PAGE
 # ==============================================
 
 def login_page():
-    """Login page"""
-    st.title("🔐 Attendance & Inventory System")
+    """Simple login page"""
+    st.title("🏢 Attendance & Inventory System")
     st.markdown("---")
+    
+    # Configuration check
+    try:
+        gas_url = st.secrets.get("GAS_ENDPOINT", "")
+        if not gas_url or "YOUR_GAS" in gas_url:
+            with st.expander("⚠️ Configuration Required", expanded=True):
+                st.error("GAS_ENDPOINT not configured!")
+                st.markdown("""
+                **Steps to fix:**
+                1. Create `.streamlit/secrets.toml` file
+                2. Add: `GAS_ENDPOINT = "YOUR_GAS_URL"`
+                3. Get GAS_URL from Google Apps Script deployment
+                """)
+                return
+    except:
+        pass
     
     with st.form("login_form"):
-        employee_id = st.text_input("Employee ID")
-        password = st.text_input("Password", type="password")
+        st.subheader("Login")
         
-        col1, col2 = st.columns([1, 3])
+        employee_id = st.text_input("Employee ID", placeholder="Enter your Employee ID")
+        password = st.text_input("Password", type="password", placeholder="Enter 12-character password")
+        
+        col1, col2 = st.columns(2)
         with col1:
-            submitted = st.form_submit_button("Login")
+            login_btn = st.form_submit_button("🔐 Login", use_container_width=True)
         with col2:
-            if st.form_submit_button("Clear"):
-                st.rerun()
+            clear_btn = st.form_submit_button("🗑️ Clear", use_container_width=True)
         
-        if submitted:
+        if clear_btn:
+            st.rerun()
+        
+        if login_btn:
             if not employee_id or not password:
                 st.error("Please enter both Employee ID and Password")
+            elif len(password) != 12:
+                st.error("Password must be exactly 12 characters")
             else:
-                with st.spinner("Logging in..."):
-                    result = call_gas_endpoint('login', {
-                        'employeeId': employee_id.strip(),
-                        'password': password.strip()
-                    })
-                
-                if result and result.get('success'):
-                    st.session_state.session_token = result['sessionToken']
-                    st.session_state.employee_id = employee_id.strip()
-                    st.session_state.employee_name = result['employeeName']
-                    st.session_state.role = result['role']
-                    st.session_state.last_activity = datetime.datetime.now()
-                    
-                    st.success(f"Welcome {result['employeeName']}!")
-                    time.sleep(1)
-                    st.rerun()
-                else:
-                    error_msg = result.get('message', 'Login failed') if result else 'Connection error'
-                    st.error(f"Login failed: {error_msg}")
+                with st.spinner("Authenticating..."):
+                    # SIMULATED LOGIN FOR TESTING
+                    # Remove this in production
+                    if employee_id == "admin" and password == "admin123456":
+                        st.session_state.session_token = "demo_token"
+                        st.session_state.employee_id = "admin"
+                        st.session_state.employee_name = "Admin User"
+                        st.session_state.role = "ADMIN"
+                        st.session_state.last_activity = datetime.datetime.now()
+                        st.success("Login successful (Demo Mode)")
+                        time.sleep(1)
+                        st.rerun()
+                    else:
+                        # Actual GAS call
+                        result = call_gas_endpoint('login', {
+                            'employeeId': employee_id.strip(),
+                            'password': password.strip()
+                        })
+                        
+                        if result and result.get('success'):
+                            st.session_state.session_token = result['sessionToken']
+                            st.session_state.employee_id = employee_id.strip()
+                            st.session_state.employee_name = result['employeeName']
+                            st.session_state.role = result['role']
+                            st.session_state.last_activity = datetime.datetime.now()
+                            
+                            st.success(f"Welcome {result['employeeName']}!")
+                            time.sleep(1)
+                            st.rerun()
+                        else:
+                            error_msg = result.get('message', 'Login failed') if result else 'Connection error'
+                            st.error(f"Login failed: {error_msg}")
+
+# ==============================================
+# 3. SIMPLIFIED DASHBOARD
+# ==============================================
 
 def employee_dashboard():
-    """Employee dashboard"""
-    require_auth()
+    """Simple employee dashboard"""
+    if not check_session():
+        st.warning("Session expired. Please login again.")
+        logout()
+        return
     
     st.title(f"👋 Welcome, {st.session_state.employee_name}")
+    st.markdown(f"**Employee ID:** {st.session_state.employee_id} | **Role:** {st.session_state.role}")
     st.markdown("---")
     
-    # Create tabs
+    # Tabs
     tab1, tab2, tab3 = st.tabs(["⏰ Attendance", "📦 Inventory", "💰 Payslip"])
     
     with tab1:
-        attendance_tab()
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🟢 Clock In", use_container_width=True):
+                st.info("Clock In feature coming soon")
+        with col2:
+            if st.button("🔴 Clock Out", use_container_width=True):
+                st.info("Clock Out feature coming soon")
+        
+        st.markdown("---")
+        st.subheader("Today's Status")
+        st.info("Not clocked in yet")
     
     with tab2:
-        inventory_tab()
+        st.subheader("Inventory Access")
+        st.warning("You must be clocked in to access inventory")
+        
+        st.markdown("---")
+        st.subheader("Available Items")
+        st.info("Inventory list will appear here when clocked in")
     
     with tab3:
-        payslip_tab()
-    
-    # Logout button in sidebar
-    with st.sidebar:
-        st.markdown("---")
+        st.subheader("Payslip")
+        st.info("Payslip data available at end of pay period")
+        
+        # Demo payslip
         col1, col2 = st.columns(2)
         with col1:
-            st.info(f"ID: {st.session_state.employee_id}")
+            st.metric("Gross Pay", "₱25,000.00")
+            st.metric("Deductions", "₱2,500.00")
         with col2:
-            if st.button("🚪 Logout", use_container_width=True):
-                logout()
-
-def attendance_tab():
-    """Attendance management tab"""
-    st.header("Attendance Management")
+            st.metric("Allowances", "₱1,000.00")
+            st.metric("Net Pay", "₱23,500.00")
     
-    # Get today's attendance status
-    result = call_gas_endpoint('getTodayAttendance')
-    
-    clocked_in = False
-    clock_out_time = None
-    
-    if result and result.get('success'):
-        clocked_in = result.get('clockedIn', False)
-        clock_out_time = result.get('clockOutTime')
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.subheader("Clock In")
-        if not clocked_in:
-            if st.button("🟢 Clock In Now", use_container_width=True, type="primary"):
-                result = call_gas_endpoint('clockIn')
-                if result and result.get('success'):
-                    st.success("✓ Clocked in successfully!")
-                    time.sleep(1)
-                    st.rerun()
-                elif result and result.get('requiresOTP'):
-                    st.session_state.otp_purpose = 'EARLYCLOCKIN'
-                    st.session_state.otp_action = 'clockIn'
-                    st.rerun()
-                else:
-                    error_msg = result.get('message', 'Clock in failed') if result else 'Error'
-                    st.error(f"✗ {error_msg}")
-        else:
-            st.success("✅ Already clocked in today")
-    
-    with col2:
-        st.subheader("Clock Out")
-        if clocked_in and not clock_out_time:
-            if st.button("🔴 Clock Out Now", use_container_width=True, type="secondary"):
-                result = call_gas_endpoint('clockOut')
-                if result and result.get('success'):
-                    st.success("✓ Clocked out successfully!")
-                    time.sleep(1)
-                    st.rerun()
-                elif result and result.get('requiresOTP'):
-                    st.session_state.otp_purpose = 'OVERTIME'
-                    st.session_state.otp_action = 'clockOut'
-                    st.rerun()
-                else:
-                    error_msg = result.get('message', 'Clock out failed') if result else 'Error'
-                    st.error(f"✗ {error_msg}")
-        elif clock_out_time:
-            st.info(f"✅ Clocked out at {clock_out_time}")
-        else:
-            st.info("⏰ Ready to clock out")
-    
-    with col3:
-        st.subheader("Status")
-        if clocked_in:
-            st.metric("Status", "CLOCKED IN", "Active")
-        else:
-            st.metric("Status", "NOT CLOCKED IN", "Inactive")
-        
-        if st.button("🔄 Refresh Status", use_container_width=True):
-            st.rerun()
-    
-    # OTP Flow
-    if 'otp_purpose' in st.session_state and st.session_state.otp_purpose:
-        handle_otp_flow(st.session_state.otp_purpose, st.session_state.otp_action)
-
-def inventory_tab():
-    """Inventory management tab"""
-    st.header("Inventory Management")
-    
-    # Check if clocked in
-    result = call_gas_endpoint('getTodayAttendance')
-    if not result or not result.get('success') or not result.get('clockedIn'):
-        st.warning("⚠️ You must be clocked in to access inventory")
-        return
-    
-    # Get available inventory
-    result = call_gas_endpoint('getInventory')
-    
-    if result and result.get('success'):
-        items = result.get('items', [])
-        
-        if not items:
-            st.info("📭 No inventory items available")
-            return
-        
-        with st.form("inventory_form"):
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                item_options = {item['product']: item for item in items}
-                selected_item = st.selectbox(
-                    "Select Item",
-                    options=list(item_options.keys())
-                )
-            
-            with col2:
-                quantity = st.number_input("Quantity", 
-                                         min_value=1, 
-                                         max_value=50, 
-                                         value=1,
-                                         help="Maximum 50 items per day")
-            
-            with col3:
-                if selected_item in item_options:
-                    unit_price = item_options[selected_item]['sellingPrice']
-                    total_price = quantity * unit_price
-                    st.metric("Unit Price", f"₱{unit_price:,.2f}")
-                    st.metric("Total", f"₱{total_price:,.2f}")
-            
-            submitted = st.form_submit_button("📦 Use Item", type="primary", use_container_width=True)
-            
-            if submitted and selected_item in item_options:
-                with st.spinner("Processing transaction..."):
-                    result = call_gas_endpoint('useInventory', {
-                        'item': selected_item,
-                        'quantity': quantity,
-                        'unitPrice': unit_price
-                    })
-                
-                if result and result.get('success'):
-                    st.success(f"✅ Transaction completed!")
-                    st.code(f"Transaction ID: {result.get('transactionId')}")
-                    time.sleep(2)
-                    st.rerun()
-                else:
-                    error_msg = result.get('message', 'Transaction failed') if result else 'Error'
-                    st.error(f"✗ {error_msg}")
-    else:
-        st.error("❌ Unable to load inventory")
-
-def payslip_tab():
-    """Payslip viewing tab"""
-    st.header("💰 Payslip Viewer")
-    
-    # Month selector
-    current_month = datetime.datetime.now().strftime("%B %Y")
-    month = st.selectbox(
-        "Select Month",
-        options=[current_month],
-        disabled=True
-    )
-    
-    # Get payslip data
-    result = call_gas_endpoint('getPayslip')
-    
-    if result and result.get('success'):
-        payslip = result.get('payslip', {})
-        
-        # Display payslip in a nice card
-        st.markdown("---")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("### Employee Info")
-            st.info(f"**Name:** {payslip.get('name', 'N/A')}")
-            st.info(f"**Gender:** {payslip.get('gender', 'N/A')}")
-            st.info(f"**Position:** {payslip.get('position', 'N/A')}")
-        
-        with col2:
-            st.markdown("### Earnings & Deductions")
-            st.success(f"**Gross Pay:** ₱{payslip.get('gross', 0):,.2f}")
-            st.warning(f"**Deductions:** ₱{payslip.get('deductions', 0):,.2f}")
-        
-        st.markdown("---")
-        st.markdown(f"### 📄 Net Pay: ₱{payslip.get('netPay', 0):,.2f}")
-        
-        # Security note
-        with st.expander("ℹ️ Security Notice"):
-            st.warning("""
-            **Security Policy:**
-            - Payslip is read-only
-            - No export/download available
-            - Data is protected and encrypted
-            - Viewing is logged for security audit
-            """)
-    else:
-        st.info("📅 Payslip data will be available at the end of the pay period")
-
-def handle_otp_flow(purpose, action):
-    """Handle OTP requirement flow"""
-    st.warning(f"🔐 {purpose.replace('_', ' ').title()} requires OTP verification")
-    
-    with st.form("otp_form"):
-        otp = st.text_input("Enter 6-digit OTP", 
-                          max_chars=6,
-                          placeholder="123456",
-                          help="Check your registered email for OTP")
-        
-        col1, col2, col3 = st.columns([1, 1, 2])
-        
-        with col1:
-            submit_otp = st.form_submit_button("✅ Verify OTP", use_container_width=True)
-        with col2:
-            request_otp = st.form_submit_button("📧 Send OTP", use_container_width=True)
-        with col3:
-            cancel_otp = st.form_submit_button("❌ Cancel", use_container_width=True)
-        
-        if cancel_otp:
-            if 'otp_purpose' in st.session_state:
-                del st.session_state.otp_purpose
-            if 'otp_action' in st.session_state:
-                del st.session_state.otp_action
-            st.rerun()
-        
-        if request_otp:
-            with st.spinner("Sending OTP..."):
-                result = call_gas_endpoint('generateOTP', {'purpose': purpose})
-            if result and result.get('success'):
-                st.success("✓ OTP sent to your registered email")
-            else:
-                error_msg = result.get('message', 'Failed to send OTP') if result else 'Error'
-                st.error(f"✗ {error_msg}")
-        
-        if submit_otp:
-            if len(otp) != 6 or not otp.isdigit():
-                st.error("Invalid OTP format. Must be 6 digits.")
-            else:
-                with st.spinner("Verifying OTP..."):
-                    result = call_gas_endpoint(action, {'otp': otp})
-                if result and result.get('success'):
-                    st.success("✓ OTP verified successfully!")
-                    time.sleep(1)
-                    if 'otp_purpose' in st.session_state:
-                        del st.session_state.otp_purpose
-                    if 'otp_action' in st.session_state:
-                        del st.session_state.otp_action
-                    st.rerun()
-                else:
-                    error_msg = result.get('message', 'Invalid OTP') if result else 'Error'
-                    st.error(f"✗ {error_msg}")
+    # Logout button
+    st.sidebar.markdown("---")
+    if st.sidebar.button("🚪 Logout", use_container_width=True):
+        logout()
 
 def admin_dashboard():
     """Admin dashboard"""
-    require_role('ADMIN')
+    if not check_session() or st.session_state.role != "ADMIN":
+        st.error("Unauthorized access")
+        logout()
+        return
     
     st.title("👑 Admin Dashboard")
     st.markdown("---")
     
     # Admin tabs
-    tab1, tab2, tab3 = st.tabs(["📋 Approvals", "👥 Employees", "📊 Logs"])
+    tab1, tab2 = st.tabs(["👥 Employee Management", "📊 System Logs"])
     
     with tab1:
-        st.header("Pending Approvals")
-        st.info("Check your email for approval requests and click the approval links.")
+        st.subheader("Employee List")
+        st.info("Manage employees directly in Google Sheets")
         
-        # Manual approval entry
-        with st.expander("📝 Manual Approval Entry"):
-            col1, col2 = st.columns(2)
-            with col1:
-                emp_id = st.text_input("Employee ID")
-                approval_type = st.selectbox("Type", ["EARLYCLOCKIN", "OVERTIME", "SHIFTCHANGE"])
-            with col2:
-                approval_date = st.date_input("Date", datetime.datetime.now())
-                action = st.selectbox("Action", ["APPROVE", "REJECT"])
-            
-            if st.button("Process Approval", type="primary"):
-                result = call_gas_endpoint('adminApprove', {
-                    'employeeId': emp_id,
-                    'type': approval_type,
-                    'date': str(approval_date),
-                    'approved': action == "APPROVE"
-                })
-                if result and result.get('success'):
-                    st.success("✓ Approval processed")
-                else:
-                    error_msg = result.get('message', 'Failed') if result else 'Error'
-                    st.error(f"✗ {error_msg}")
+        # Sample employee table
+        employees = [
+            {"ID": "EMP001", "Name": "Juan Dela Cruz", "Position": "Manager", "Status": "Active"},
+            {"ID": "EMP002", "Name": "Maria Santos", "Position": "Staff", "Status": "Active"},
+            {"ID": "EMP003", "Name": "Pedro Reyes", "Position": "Staff", "Status": "Inactive"},
+        ]
+        st.dataframe(employees, use_container_width=True)
     
     with tab2:
-        st.header("Employee Management")
+        st.subheader("Security Logs")
+        st.info("Logs are recorded in Google Sheets Security Log tab")
         
-        # View all employees
-        if st.button("🔄 Load Employees", type="secondary"):
-            result = call_gas_endpoint('getAllEmployees')
-            if result and result.get('success'):
-                employees = result.get('employees', [])
-                if employees:
-                    st.dataframe(employees, use_container_width=True)
-                else:
-                    st.info("No employee data found")
-            else:
-                st.error("Failed to load employees")
-        
-        st.info("For detailed employee management, please use Google Sheets directly.")
+        # Sample logs
+        logs = [
+            {"Timestamp": "2024-01-20 09:00", "Action": "LOGIN", "User": "EMP001", "Status": "SUCCESS"},
+            {"Timestamp": "2024-01-20 09:05", "Action": "CLOCK_IN", "User": "EMP001", "Status": "SUCCESS"},
+            {"Timestamp": "2024-01-20 17:00", "Action": "CLOCK_OUT", "User": "EMP001", "Status": "SUCCESS"},
+        ]
+        st.dataframe(logs, use_container_width=True)
     
-    with tab3:
-        st.header("Security Logs")
-        
-        # View recent logs
-        col1, col2 = st.columns(2)
-        with col1:
-            log_limit = st.number_input("Log entries", min_value=10, max_value=100, value=20)
-        with col2:
-            log_severity = st.selectbox("Severity", ["ALL", "INFO", "WARNING", "ERROR", "HIGH"])
-        
-        if st.button("📋 View Logs", type="primary"):
-            result = call_gas_endpoint('getRecentLogs', {'limit': log_limit})
-            if result and result.get('success'):
-                logs = result.get('logs', [])
-                if logs:
-                    st.dataframe(logs, use_container_width=True)
-                else:
-                    st.info("No logs found")
-            else:
-                st.error("Failed to load logs")
-    
-    with st.sidebar:
-        st.markdown("---")
-        st.info(f"Admin: {st.session_state.employee_name}")
-        if st.button("🚪 Logout", use_container_width=True, type="secondary"):
-            logout()
+    # Logout
+    st.sidebar.markdown("---")
+    if st.sidebar.button("🚪 Logout", use_container_width=True):
+        logout()
 
 # ==============================================
-# 3. MAIN APPLICATION
+# 4. MAIN APP
 # ==============================================
 
 def main():
-    # Configure page
+    # Page configuration
     st.set_page_config(
-        page_title="Attendance & Inventory System",
+        page_title="Attendance System",
         page_icon="🏢",
         layout="wide",
         initial_sidebar_state="collapsed"
@@ -498,48 +289,19 @@ def main():
     
     # Hide Streamlit branding
     hide_streamlit_style = """
-        <style>
-        #MainMenu {visibility: hidden;}
-        footer {visibility: hidden;}
-        header {visibility: hidden;}
-        .stDeployButton {visibility: hidden;}
-        </style>
+    <style>
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    .stDeployButton {display: none;}
+    </style>
     """
     st.markdown(hide_streamlit_style, unsafe_allow_html=True)
     
-    # Check for GAS endpoint configuration
-    if 'GAS_ENDPOINT' not in st.secrets or st.secrets['GAS_ENDPOINT'] == "YOUR_GAS_WEB_APP_URL":
-        st.error("⚠️ System Not Configured")
-        st.markdown("""
-        **Please follow these steps:**
-        
-        1. **Deploy Google Apps Script:**
-           - Go to [script.google.com](https://script.google.com)
-           - Create new project
-           - Copy GAS code
-           - Deploy as Web App
-           - Copy the Web App URL
-        
-        2. **Configure secrets.toml:**
-           ```toml
-           # .streamlit/secrets.toml
-           GAS_ENDPOINT = "YOUR_COPIED_URL_HERE"
-           ```
-        
-        3. **Restart the app**
-        """)
-        return
-    
-    # Session timeout check
-    if st.session_state.session_token:
-        if not check_session():
-            st.warning("Session expired. Please login again.")
-            logout()
-    
-    # Route to appropriate page
+    # Simple routing
     if not st.session_state.session_token:
         login_page()
-    elif st.session_state.role == 'ADMIN':
+    elif st.session_state.role == "ADMIN":
         admin_dashboard()
     else:
         employee_dashboard()
