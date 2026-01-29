@@ -100,80 +100,31 @@ def logout():
 # 2. SIMPLIFIED LOGIN PAGE
 # ==============================================
 
+# SIMPLIFIED LOGIN (DEMO ONLY)
 def login_page():
-    """Simple login page"""
-    st.title("🏢 Attendance & Inventory System")
-    st.markdown("---")
+    st.title("🏢 Attendance System (DEMO MODE)")
     
-    # Configuration check
-    try:
-        gas_url = st.secrets.get("GAS_ENDPOINT", "")
-        if not gas_url or "YOUR_GAS" in gas_url:
-            with st.expander("⚠️ Configuration Required", expanded=True):
-                st.error("GAS_ENDPOINT not configured!")
-                st.markdown("""
-                **Steps to fix:**
-                1. Create `.streamlit/secrets.toml` file
-                2. Add: `GAS_ENDPOINT = "YOUR_GAS_URL"`
-                3. Get GAS_URL from Google Apps Script deployment
-                """)
-                return
-    except:
-        pass
+    employee_id = st.text_input("Employee ID")
+    password = st.text_input("Password", type="password")
     
-    with st.form("login_form"):
-        st.subheader("Login")
-        
-        employee_id = st.text_input("Employee ID", placeholder="Enter your Employee ID")
-        password = st.text_input("Password", type="password", placeholder="Enter 12-character password")
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            login_btn = st.form_submit_button("🔐 Login", use_container_width=True)
-        with col2:
-            clear_btn = st.form_submit_button("🗑️ Clear", use_container_width=True)
-        
-        if clear_btn:
+    if st.button("Login"):
+        # Demo credentials
+        if employee_id == "admin" and password == "admin123456":
+            st.session_state.session_token = "demo"
+            st.session_state.employee_id = "admin"
+            st.session_state.employee_name = "Admin User"
+            st.session_state.role = "ADMIN"
+            st.success("Login successful (Demo Mode)")
             st.rerun()
-        
-        if login_btn:
-            if not employee_id or not password:
-                st.error("Please enter both Employee ID and Password")
-            elif len(password) != 12:
-                st.error("Password must be exactly 12 characters")
-            else:
-                with st.spinner("Authenticating..."):
-                    # SIMULATED LOGIN FOR TESTING
-                    # Remove this in production
-                    if employee_id == "admin" and password == "admin123456":
-                        st.session_state.session_token = "demo_token"
-                        st.session_state.employee_id = "admin"
-                        st.session_state.employee_name = "Admin User"
-                        st.session_state.role = "ADMIN"
-                        st.session_state.last_activity = datetime.datetime.now()
-                        st.success("Login successful (Demo Mode)")
-                        time.sleep(1)
-                        st.rerun()
-                    else:
-                        # Actual GAS call
-                        result = call_gas_endpoint('login', {
-                            'employeeId': employee_id.strip(),
-                            'password': password.strip()
-                        })
-                        
-                        if result and result.get('success'):
-                            st.session_state.session_token = result['sessionToken']
-                            st.session_state.employee_id = employee_id.strip()
-                            st.session_state.employee_name = result['employeeName']
-                            st.session_state.role = result['role']
-                            st.session_state.last_activity = datetime.datetime.now()
-                            
-                            st.success(f"Welcome {result['employeeName']}!")
-                            time.sleep(1)
-                            st.rerun()
-                        else:
-                            error_msg = result.get('message', 'Login failed') if result else 'Connection error'
-                            st.error(f"Login failed: {error_msg}")
+        elif employee_id == "emp001" and password == "password1234":
+            st.session_state.session_token = "demo"
+            st.session_state.employee_id = "emp001"
+            st.session_state.employee_name = "Juan Dela Cruz"
+            st.session_state.role = "EMPLOYEE"
+            st.success("Login successful (Demo Mode)")
+            st.rerun()
+        else:
+            st.error("Use: admin/admin123456 or emp001/password1234")
 
 # ==============================================
 # 3. SIMPLIFIED DASHBOARD
